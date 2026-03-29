@@ -6,7 +6,7 @@ und sendet eine Nachricht in einem konfigurierten Text-Channel.
 
 Installation:
 1. Kopiere den gesamten 'supportcog' Ordner in deinen RedBot cogs Ordner
-   (normalerweise ~/.local/share/Red-DiscordBot/data/[DEIN_BOT_NAME]/cogs/)
+   (normalisieren ~/.local/share/Red-DiscordBot/data/[DEIN_BOT_NAME]/cogs/)
 2. Lade den Cog mit: [p]load supportcog
 3. Konfiguriere mit:
    - [p]supportset channel #textchannel  (Setzt den Text-Channel für Benachrichtigungen)
@@ -15,12 +15,13 @@ Installation:
 
 Nutzung:
 Wenn jemand den konfigurierten Voice-Channel betritt, wird automatisch
-eine Nachricht im Text-Channel gesendet, die die konfigurierte Rolle pingt.
+ein schönes Embed im Text-Channel gesendet, das die konfigurierte Rolle pingt.
 """
 
 import discord
 from redbot.core import commands, checks, Config
 from redbot.core.bot import Red
+from datetime import datetime
 
 
 class SupportCog(commands.Cog):
@@ -34,7 +35,7 @@ class SupportCog(commands.Cog):
             "channel": None,  # Text-Channel ID für Benachrichtigungen
             "room": None,     # Voice-Channel ID des Warteraums
             "role": None,     # Rolle ID die gepingt wird
-            "message_template": "{user} ist im Support Warteraum.",  # Nachrichten-Vorlage
+            "use_embed": True,  # Ob Embeds verwendet werden sollen
             "enabled": True   # Ob der Cog aktiv ist
         }
         
@@ -61,20 +62,21 @@ class SupportCog(commands.Cog):
         room_id = await self.config.guild(guild).room()
         channel_id = await self.config.guild(guild).channel()
         role_id = await self.config.guild(guild).role()
-        message_template = await self.config.guild(guild).message_template()
+        use_embed = await self.config.guild(guild).use_embed()
         
         # Prüfen ob alle erforderlichen Einstellungen gesetzt sind
         if not all([room_id, channel_id, role_id]):
             return
         
         # Prüfen ob es der konfigurierte Warteraum ist
-        if after.channel and after.channel.id != room_id:
+        # User muss DEN Warteraum BETRETEN (vorher woanders oder offline, jetzt im Warteraum)
+        if after.channel is None or after.channel.id != room_id:
             return
-        if before.channel and before.channel.id == room_id:
-            # User hat den Warteraum verlassen - keine Aktion nötig
+        if before.channel is not None and before.channel.id == room_id:
+            # User war bereits im Warteraum - keine Aktion
             return
         
-        # User hat den Warteraum betreten
+        # User hat den Warteraum soeben betreten
         try:
             channel = guild.get_channel(channel_id)
             if not channel or not isinstance(channel, discord.TextChannel):
@@ -84,25 +86,51 @@ class SupportCog(commands.Cog):
             if not role:
                 return
             
-            # Erstelle die Nachricht
+            # Baue die Nachricht mit korrektem Role-Ping
+            # Wichtig: Role-mention muss als roher String gesendet werden
+            role_mention = f"<@&{role_id}>"
             user_mention = member.mention
-            role_mention = role.mention
+            user_avatar = member.display_avatar.url
             
-            message = message_template.format(
-                user=user_mention,
-                user_name=member.display_name,
-                role=role_mention,
-                role_name=role.name
-            )
-            
-            # Sende die Nachricht
-            await channel.send(message)
+            if use_embed:
+                # Erstelle ein schönes Embed
+                embed = discord.Embed(
+                    title="🎧 Neuer Support-Anfrage",
+                    description=f"{user_mention} hat den Support-Warteraum betreten und wartet auf Hilfe!",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.utcnow()
+                )
+                
+                embed.set_thumbnail(url=user_avatar)
+                embed.add_field(
+                    name="👤 Nutzer",
+                    value=f"{user_mention}\n(`{member.display_name}`)",
+                    inline=True
+                )
+                embed.add_field(
+                    name="🔔 Support Team",
+                    value=f"{role_mention}",
+                    inline=True
+                )
+                embed.add_field(
+                    name="📍 Channel",
+                    value=f"{after.channel.mention}",
+                    inline=True
+                )
+                embed.set_footer(text="Support Warteraum System")
+                
+                # Sende das Embed mit zusätzlichem Role-Ping im Content
+                await channel.send(content=f"{role_mention}", embed=embed)
+            else:
+                # Einfache Textnachricht (Fallback)
+                message = f"🎧 {role_mention} | {user_mention} (`{member.display_name}`) ist im Support-Warteraum ({after.channel.mention})"
+                await channel.send(message)
             
         except discord.Forbidden:
             # Bot hat keine Berechtigung zum Senden
             pass
         except Exception as e:
-            # Logge Fehler stillschweigend
+            # Logge Fehler
             print(f"Fehler in SupportCog: {e}")
 
     @commands.group(name="supportset", aliases=["supportconfig"])
@@ -130,21 +158,23 @@ class SupportCog(commands.Cog):
         await self.config.guild(ctx.guild).role.set(role.id)
         await ctx.send(f"✅ Support-Rolle auf {role.mention} gesetzt.")
 
-    @supportset.command(name="message")
-    async def supportset_message(self, ctx: commands.Context, *, template: str):
+    @supportset.command(name="embed")
+    async def supportset_embed(self, ctx: commands.Context, enabled: bool = None):
         """
-        Setze die Nachrichten-Vorlage.
+        Aktiviere oder deaktiviere Embed-Nachrichten.
         
-        Verfügbare Platzhalter:
-        {user} - Erwähnt den Nutzer
-        {user_name} - Name des Nutzers
-        {role} - Erwähnt die Rolle
-        {role_name} - Name der Rolle
-        
-        Beispiel: `{user} wartet im Support Warteraum auf Hilfe von {role}`
+        Embeds sehen besser aus und zeigen mehr Informationen.
+        Ohne Parameter wird der aktuelle Status umgeschaltet.
         """
-        await self.config.guild(ctx.guild).message_template.set(template)
-        await ctx.send(f"✅ Nachrichten-Vorlage aktualisiert.")
+        if enabled is None:
+            current = await self.config.guild(ctx.guild).use_embed()
+            await self.config.guild(ctx.guild).use_embed.set(not current)
+            status = "aktiviert" if not current else "deaktiviert"
+        else:
+            await self.config.guild(ctx.guild).use_embed.set(enabled)
+            status = "aktiviert" if enabled else "deaktiviert"
+        
+        await ctx.send(f"✅ Embed-Nachrichten {status}.")
 
     @supportset.command(name="toggle")
     async def supportset_toggle(self, ctx: commands.Context):
@@ -162,23 +192,24 @@ class SupportCog(commands.Cog):
         channel_id = guild_data.get("channel")
         room_id = guild_data.get("room")
         role_id = guild_data.get("role")
-        template = guild_data.get("message_template")
+        use_embed = guild_data.get("use_embed", True)
         enabled = guild_data.get("enabled")
         
         channel_mention = f"<#{channel_id}>" if channel_id else "❌ Nicht gesetzt"
         room_mention = f"<#{room_id}>" if room_id else "❌ Nicht gesetzt"
         role_mention = f"<@&{role_id}>" if role_id else "❌ Nicht gesetzt"
-        status = "✅ Aktiv" if enabled else "❌ Deaktiviert"
+        embed_status = "✅ Aktiv" if use_embed else "❌ Deaktiviert"
+        cog_status = "✅ Aktiv" if enabled else "❌ Deaktiviert"
         
         embed = discord.Embed(
             title="🛠️ Support Warteraum Konfiguration",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Status", value=status, inline=False)
+        embed.add_field(name="Cog Status", value=cog_status, inline=False)
+        embed.add_field(name="Embeds", value=embed_status, inline=True)
         embed.add_field(name="Text-Channel", value=channel_mention, inline=True)
         embed.add_field(name="Voice-Warteraum", value=room_mention, inline=True)
         embed.add_field(name="Support-Rolle", value=role_mention, inline=True)
-        embed.add_field(name="Nachrichten-Vorlage", value=f"`{template}`", inline=False)
         
         await ctx.send(embed=embed)
 
