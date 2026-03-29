@@ -9,28 +9,33 @@ __pycache__/
 .venv/
 venv/
 env/
-
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-
-# Environment
 .env
 .env.local
-*.env.*
+.env.*
 
-# Editors
-.vscode/
-.idea/
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Coverage
 .coverage
 coverage/
 htmlcov/
 
-# Build artifacts
-dist/
+# IDE
+.vscode/
+.idea/
+
+# Build
 build/
+dist/
 *.egg-info/
 ```

@@ -3,7 +3,7 @@ Support Warteraum Cog für RedBot mit On-Duty System
 
 Dieser Cog erkennt, wenn ein Nutzer einen Support-Warteraum betritt oder verlässt
 und sendet eine Nachricht in einem konfigurierten Text-Channel.
-Enthält ein On-Duty System für Support-Teammitglieder.
+Enthält ein On-Duty System für Support-Teammitglieder, Feedback-System und Support-Alarm.
 
 Installation:
 1. Kopiere den gesamten 'supportcog' Ordner in deinen RedBot cogs Ordner
@@ -13,6 +13,10 @@ Installation:
    - [p]supportset channel #textchannel ODER Channel-ID  (Setzt den Text-Channel für Benachrichtigungen)
    - [p]supportset room @VoiceChannel ODER Voice-Channel-ID  (Setzt den Voice-Warteraum)
    - [p]supportset role @Rolle ODER Rollen-ID  (Setzt die Basis-Supportrolle)
+   - [p]supportset feedbackchannel #channel  (Setzt den Channel für Feedback-Logs)
+   - [p]supportset supportcallchannel #channel  (Setzt den Channel für Supportrufe)
+   - [p]supportset supportcallrole @Rolle  (Setzt die Rolle die bei Supportrufen gepingt wird)
+   - [p]supportset autoduty <Minuten>  (Setzt die Zeit bis zur automatischen Duty-Abmeldung)
    - ODER verwende [p]supportset setup für einen interaktiven Einrichtungsassistenten
 
 Nutzung:
@@ -20,6 +24,8 @@ Nutzung:
   eine schöne Nachricht im Text-Channel gesendet.
 - Support-Teamler können sich mit Buttons an- und abmelden
 - Nur Teamler mit der "On Duty" Rolle werden gepingt!
+- Feedback-Panel mit `[p]feedback panel` erstellen
+- Support-Alarm-Panel mit `[p]supportcall panel` erstellen
 """
 
 import discord
@@ -47,7 +53,12 @@ class SupportCog(commands.Cog):
             "enabled": True,   # Ob der Cog aktiv ist
             "duty_channel": None,  # Channel für Duty-Nachrichten
             "auto_remove_duty": True,  # Automatisch Duty entfernen nach X Stunden
-            "duty_timeout": 4  # Stunden nach denen Duty automatisch entfernt wird
+            "duty_timeout": 4,  # Stunden nach denen Duty automatisch entfernt wird
+            "feedback_channel": None,  # Channel für Feedback Logs
+            "feedback_enabled": True,  # Ob Feedback System aktiv ist
+            "supportcall_channel": None,  # Channel für Supportrufe
+            "supportcall_role": None,  # Rolle die bei Supportruf gepingt wird
+            "autoduty_minutes": 60  # Minuten bis zur automatischen Duty-Abmeldung
         }
         
         # Speichert On-Duty Status pro User
@@ -480,22 +491,76 @@ class SupportCog(commands.Cog):
             await ctx.send(f"✅ Duty-Nachrichten werden jetzt in {channel.mention} angezeigt.")
 
     @supportset.command(name="autoduty")
-    async def supportset_autoduty(self, ctx: commands.Context, hours: int = None):
+    async def supportset_autoduty(self, ctx: commands.Context, minutes: int = None):
         """
-        Konfiguriere automatisches Duty-Ende nach X Stunden.
+        Konfiguriere automatisches Duty-Ende nach X Minuten.
         
-        - `0` oder `off`: Automatisches Beenden deaktivieren
-        - `1-24`: Anzahl der Stunden nach denen Duty automatisch endet
+        - `0`: Automatisches Beenden deaktivieren
+        - `5-1440`: Anzahl der Minuten nach denen Duty automatisch endet (Standard: 60)
         """
-        if hours is None or hours <= 0:
+        if minutes is None or minutes <= 0:
             await self.config.guild(ctx.guild).auto_remove_duty.set(False)
             await ctx.send("✅ Automatisches Duty-Ende deaktiviert.")
         else:
-            if hours > 24:
-                hours = 24
+            if minutes < 5:
+                minutes = 5
+            elif minutes > 1440:
+                minutes = 1440
             await self.config.guild(ctx.guild).auto_remove_duty.set(True)
-            await self.config.guild(ctx.guild).duty_timeout.set(hours)
-            await ctx.send(f"✅ Duty wird automatisch nach {hours} Stunden beendet.")
+            await self.config.guild(ctx.guild).autoduty_minutes.set(minutes)
+            hours = minutes / 60
+            await ctx.send(f"✅ Duty wird automatisch nach {minutes} Minuten ({hours:.1f}h) beendet.")
+
+    @supportset.command(name="feedbackchannel")
+    async def supportset_feedbackchannel(self, ctx: commands.Context, channel: discord.TextChannel = None):
+        """
+        Setze den Channel für Feedback-Logs.
+        Ohne Channel-Angabe wird Feedback deaktiviert.
+        """
+        if channel is None:
+            await self.config.guild(ctx.guild).feedback_channel.set(None)
+            await self.config.guild(ctx.guild).feedback_enabled.set(False)
+            await ctx.send("✅ Feedback-System deaktiviert.")
+        else:
+            await self.config.guild(ctx.guild).feedback_channel.set(channel.id)
+            await self.config.guild(ctx.guild).feedback_enabled.set(True)
+            await ctx.send(f"✅ Feedback wird jetzt in {channel.mention} geloggt.")
+
+    @supportset.command(name="supportcallchannel")
+    async def supportset_supportcallchannel(self, ctx: commands.Context, channel: discord.TextChannel = None):
+        """
+        Setze den Channel für Supportrufe.
+        Ohne Channel-Angabe wird der normale Support-Channel verwendet.
+        """
+        if channel is None:
+            await self.config.guild(ctx.guild).supportcall_channel.set(None)
+            await ctx.send("✅ Supportrufe werden im normalen Support-Channel angezeigt.")
+        else:
+            await self.config.guild(ctx.guild).supportcall_channel.set(channel.id)
+            await ctx.send(f"✅ Supportrufe werden jetzt in {channel.mention} angezeigt.")
+
+    @supportset.command(name="supportcallrole")
+    async def supportset_supportcallrole(self, ctx: commands.Context, role: str):
+        """
+        Setze die Rolle die bei Supportrufen gepingt wird (Mention oder ID).
+        """
+        role_obj = None
+        
+        if role.startswith("<@&") and role.endswith(">"):
+            role_id = int(role[3:-1])
+            role_obj = ctx.guild.get_role(role_id)
+        elif role.isdigit():
+            role_obj = ctx.guild.get_role(int(role))
+        else:
+            if ctx.message.role_mentions:
+                role_obj = ctx.message.role_mentions[0]
+        
+        if not role_obj:
+            await ctx.send("❌ Bitte erwähne eine gültige Rolle mit @ oder gib die Rollen-ID ein!")
+            return
+        
+        await self.config.guild(ctx.guild).supportcall_role.set(role_obj.id)
+        await ctx.send(f"✅ Support-Ruf Rolle auf {role_obj.mention} gesetzt.")
 
     # ============================================
     # DUTY COMMANDS - Für Support-Teammitglieder
@@ -931,9 +996,206 @@ class DutyToggleButton(discord.ui.Button):
             await interaction.response.send_message(embed=embed)
 
 
+# ============================================
+# FEEDBACK SYSTEM - Modal und Buttons
+# ============================================
+
+class FeedbackModal(discord.ui.Modal, title="Feedback senden"):
+    """Modal für Feedback-Eingabe"""
+    
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+        self.feedback_text = discord.ui.TextInput(
+            label="Dein Feedback",
+            style=discord.TextStyle.paragraph,
+            placeholder="Beschreibe deine Erfahrung mit dem Support...",
+            min_length=10,
+            max_length=2000,
+            required=True
+        )
+        self.append_item(self.feedback_text)
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Wird aufgerufen wenn das Modal abgeschickt wird"""
+        guild = interaction.guild
+        feedback_channel_id = await self.cog.config.guild(guild).feedback_channel()
+        
+        if not feedback_channel_id:
+            await interaction.response.send_message(
+                "❌ Das Feedback-System ist derzeit nicht konfiguriert!",
+                ephemeral=True
+            )
+            return
+        
+        feedback_channel = guild.get_channel(feedback_channel_id)
+        if not feedback_channel:
+            await interaction.response.send_message(
+                "❌ Der Feedback-Channel wurde nicht gefunden!",
+                ephemeral=True
+            )
+            return
+        
+        feedback_content = self.feedback_text.value
+        
+        # Erstelle Embed für Feedback
+        embed = discord.Embed(
+            title="📝 Neues Feedback erhalten",
+            description=feedback_content,
+            color=discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+        embed.add_field(name="👤 Nutzer", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
+        embed.add_field(name="📍 Channel", value=f"{interaction.channel.mention}", inline=True)
+        embed.set_footer(text=f"Feedback von {interaction.user.display_name}")
+        
+        # Sende ins Feedback-Channel
+        await feedback_channel.send(embed=embed)
+        
+        # Bestätigung an User
+        confirm_embed = discord.Embed(
+            title="✅ Feedback gesendet",
+            description="Vielen Dank für dein Feedback! Wir werden es sorgfältig prüfen.",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+        await interaction.response.send_message(embed=confirm_embed, ephemeral=True)
+
+
+class FeedbackButton(discord.ui.Button):
+    """Button zum Öffnen des Feedback-Modals"""
+    
+    def __init__(self, cog):
+        super().__init__(
+            style=discord.ButtonStyle.blurple,
+            label="Feedback geben",
+            custom_id="feedback_button",
+            emoji="📝"
+        )
+        self.cog = cog
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Wird aufgerufen wenn der Button geklickt wird"""
+        modal = FeedbackModal(self.cog)
+        await interaction.response.send_modal(modal)
+
+
+# ============================================
+# SUPPORT CALL / ALERT SYSTEM
+# ============================================
+
+class SupportCallView(discord.ui.View):
+    """View für Support-Alarm Buttons"""
+    
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+    
+    @discord.ui.button(
+        label="🔴 Support rufen",
+        style=discord.ButtonStyle.red,
+        custom_id="support_call_button",
+        emoji="📢"
+    )
+    async def support_call(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Support-Alarm auslösen"""
+        guild = interaction.guild
+        member = interaction.user
+        
+        # Hole Konfiguration
+        call_channel_id = await self.cog.config.guild(guild).supportcall_channel()
+        default_channel_id = await self.cog.config.guild(guild).channel()
+        call_role_id = await self.cog.config.guild(guild).supportcall_role()
+        
+        # Bestimme den Channel (supportcall_channel oder fallback zu channel)
+        target_channel_id = call_channel_id if call_channel_id else default_channel_id
+        
+        if not target_channel_id:
+            await interaction.response.send_message(
+                "❌ Kein Support-Channel konfiguriert!",
+                ephemeral=True
+            )
+            return
+        
+        target_channel = guild.get_channel(target_channel_id)
+        if not target_channel:
+            await interaction.response.send_message(
+                "❌ Der Ziel-Channel wurde nicht gefunden!",
+                ephemeral=True
+            )
+            return
+        
+        # Bestimme die zu pingende Rolle
+        ping_role = None
+        if call_role_id:
+            ping_role = guild.get_role(call_role_id)
+        
+        if not ping_role:
+            # Fallback: Duty-Rolle oder Basis-Supportrolle
+            duty_role = await self.cog.get_or_create_duty_role(guild)
+            if duty_role:
+                ping_role = duty_role
+            else:
+                role_id = await self.cog.config.guild(guild).role()
+                if role_id:
+                    ping_role = guild.get_role(role_id)
+        
+        if not ping_role:
+            await interaction.response.send_message(
+                "❌ Keine Rolle für Supportrufe konfiguriert!",
+                ephemeral=True
+            )
+            return
+        
+        # Erstelle Alarm-Embed
+        embed = discord.Embed(
+            title="🚨 SUPPORT-ALARM!",
+            description=(
+                f"**{member.mention}** benötigt sofortige Unterstützung!\n\n"
+                f"Bitte findet euch umgehend im entsprechenden Channel ein."
+            ),
+            color=discord.Color.red(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="👤 Rufer", value=f"{member.display_name}\n(`{member.id}`)", inline=True)
+        embed.add_field(name="📍 Aktueller Channel", value=f"{interaction.channel.mention}", inline=True)
+        embed.add_field(name="🎯 Ziel-Channel", value=f"{target_channel.mention}", inline=True)
+        embed.add_field(
+            name="⏰ Zeitpunkt",
+            value=f"<t:{int(datetime.utcnow().timestamp())}:f>\n(<t:{int(datetime.utcnow().timestamp())}:R>)",
+            inline=True
+        )
+        embed.set_footer(text="🔴 Dringender Support-Alarm")
+        
+        # Sende Alarm im Ziel-Channel mit Role-Ping
+        await target_channel.send(content=f"{ping_role.mention}", embed=embed)
+        
+        # Bestätigung an den Rufer
+        confirm_embed = discord.Embed(
+            title="✅ Support-Alarm ausgelöst",
+            description=(
+                f"Der Alarm wurde erfolgreich gesendet!\n\n"
+                f"Die Support-Mitarbeiter wurden in {target_channel.mention} benachrichtigt.\n"
+                f"Bitte warte dort auf Hilfe."
+            ),
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+        await interaction.response.send_message(embed=confirm_embed, ephemeral=True)
+
+
 async def setup(bot: Red):
     """Lädt den Cog"""
-    await bot.add_cog(SupportCog(bot))
+    cog = SupportCog(bot)
+    await bot.add_cog(cog)
+    
+    # Persistente Views registrieren
+    bot.add_view(DutyToggleButton(is_on=True))
+    bot.add_view(DutyToggleButton(is_on=False))
+    bot.add_view(FeedbackButton(cog))
+    bot.add_view(SupportCallView(cog))
 
 
 async def teardown(bot: Red):
