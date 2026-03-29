@@ -10,16 +10,16 @@ Installation:
    (normalerweise ~/.local/share/Red-DiscordBot/data/[DEIN_BOT_NAME]/cogs/)
 2. Lade den Cog mit: [p]load supportcog
 3. Konfiguriere mit:
-   - [p]supportset channel #textchannel  (Setzt den Text-Channel für Benachrichtigungen)
-   - [p]supportset room @VoiceChannel    (Setzt den Voice-Warteraum)
-   - [p]supportset role @Rolle           (Setzt die Rolle, die gepingt wird)
+   - [p]supportset channel #textchannel ODER Channel-ID  (Setzt den Text-Channel für Benachrichtigungen)
+   - [p]supportset room @VoiceChannel ODER Voice-Channel-ID  (Setzt den Voice-Warteraum)
+   - [p]supportset role @Rolle ODER Rollen-ID  (Setzt die Basis-Supportrolle)
    - ODER verwende [p]supportset setup für einen interaktiven Einrichtungsassistenten
 
 Nutzung:
 - Wenn jemand den konfigurierten Voice-Channel betritt, wird automatisch
   eine schöne Nachricht im Text-Channel gesendet.
-- Support-Teamler können sich mit [p]duty on/off an- und abmelden
-- Nur angemeldete Teamler werden gepingt!
+- Support-Teamler können sich mit Buttons an- und abmelden
+- Nur Teamler mit der "On Duty" Rolle werden gepingt!
 """
 
 import discord
@@ -28,6 +28,7 @@ from redbot.core.bot import Red
 from datetime import datetime, timedelta
 from typing import Optional
 import asyncio
+import re
 
 
 class SupportCog(commands.Cog):
@@ -41,6 +42,7 @@ class SupportCog(commands.Cog):
             "channel": None,  # Text-Channel ID für Benachrichtigungen
             "room": None,     # Voice-Channel ID des Warteraums
             "role": None,     # Rolle ID die gepingt wird (Basis-Supportrolle)
+            "duty_role": None,  # Automatisch erstellte Duty-Rolle ID
             "use_embed": True,  # Ob Embeds verwendet werden sollen
             "enabled": True,   # Ob der Cog aktiv ist
             "duty_channel": None,  # Channel für Duty-Nachrichten
@@ -59,6 +61,49 @@ class SupportCog(commands.Cog):
         
         # Cache für aktive Duty-User (wird bei Bot-Start neu aufgebaut)
         self.duty_cache = {}
+        
+        # Speichere View-Message IDs für Persistence
+        self.duty_message_ids = {}
+
+    async def get_or_create_duty_role(self, guild: discord.Guild) -> Optional[discord.Role]:
+        """Erstellt oder holt die Duty-Rolle für den Server"""
+        duty_role_id = await self.config.guild(guild).duty_role()
+        
+        if duty_role_id:
+            role = guild.get_role(duty_role_id)
+            if role:
+                return role
+        
+        # Rolle existiert nicht mehr, erstelle neue
+        try:
+            new_role = await guild.create_role(
+                name="🟢 On Duty",
+                color=discord.Color.green(),
+                mentionable=True,
+                reason="Auto-erstellte Duty-Rolle für Support-System"
+            )
+            await self.config.guild(guild).duty_role.set(new_role.id)
+            return new_role
+        except discord.Forbidden:
+            return None
+    
+    async def add_duty_role(self, member: discord.Member):
+        """Fügt einem Member die Duty-Rolle hinzu"""
+        duty_role = await self.get_or_create_duty_role(member.guild)
+        if duty_role and duty_role not in member.roles:
+            try:
+                await member.add_roles(duty_role, reason="Support-Duty aktiv")
+            except discord.Forbidden:
+                pass
+    
+    async def remove_duty_role(self, member: discord.Member):
+        """Entfernt die Duty-Rolle von einem Member"""
+        duty_role = await self.get_or_create_duty_role(member.guild)
+        if duty_role and duty_role in member.roles:
+            try:
+                await member.remove_roles(duty_role, reason="Support-Duty beendet")
+            except discord.Forbidden:
+                pass
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -119,12 +164,8 @@ class SupportCog(commands.Cog):
             user_mention = member.mention
             user_avatar = member.display_avatar.url
             
-            # Bestimme den Channel für die Nachricht
+            # Bestimme den Channel für die Nachricht - IMMER support channel!
             notify_channel = channel
-            if duty_channel_id:
-                duty_ch = guild.get_channel(duty_channel_id)
-                if duty_ch and isinstance(duty_ch, discord.TextChannel):
-                    notify_channel = duty_ch
             
             if use_embed:
                 # Erstelle ein schönes Embed
@@ -196,22 +237,79 @@ class SupportCog(commands.Cog):
         pass
 
     @supportset.command(name="channel")
-    async def supportset_channel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Setze den Text-Channel für Support-Benachrichtigungen"""
-        await self.config.guild(ctx.guild).channel.set(channel.id)
-        await ctx.send(f"✅ Text-Channel auf {channel.mention} gesetzt.")
+    async def supportset_channel(self, ctx: commands.Context, channel: str):
+        """Setze den Text-Channel für Support-Benachrichtigungen (Mention oder ID)"""
+        # Versuche Channel zu finden - entweder durch Mention oder ID
+        channel_obj = None
+        
+        # Prüfe ob es eine Mention ist (#channel oder <#123456789>)
+        if channel.startswith("<#") and channel.endswith(">"):
+            channel_id = int(channel[2:-1])
+            channel_obj = ctx.guild.get_channel(channel_id)
+        elif channel.isdigit():
+            # Es ist eine ID
+            channel_obj = ctx.guild.get_channel(int(channel))
+        else:
+            # Versuche über channel_mentions falls User einfach #channel geschrieben hat
+            if ctx.message.channel_mentions:
+                channel_obj = ctx.message.channel_mentions[0]
+        
+        if not channel_obj or not isinstance(channel_obj, discord.TextChannel):
+            await ctx.send("❌ Bitte erwähne einen gültigen Text-Channel mit # oder gib die Channel-ID ein!")
+            return
+        
+        await self.config.guild(ctx.guild).channel.set(channel_obj.id)
+        await ctx.send(f"✅ Text-Channel auf {channel_obj.mention} gesetzt.")
 
     @supportset.command(name="room")
-    async def supportset_room(self, ctx: commands.Context, room: discord.VoiceChannel):
-        """Setze den Voice-Channel als Support-Warteraum"""
-        await self.config.guild(ctx.guild).room.set(room.id)
-        await ctx.send(f"✅ Voice-Warteraum auf {room.mention} gesetzt.")
+    async def supportset_room(self, ctx: commands.Context, room: str):
+        """Setze den Voice-Channel als Support-Warteraum (Mention oder ID)"""
+        # Versuche Voice Channel zu finden - entweder durch Mention oder ID
+        room_obj = None
+        
+        # Prüfe ob es eine Mention ist (<#123456789>)
+        if room.startswith("<#") and room.endswith(">"):
+            channel_id = int(room[2:-1])
+            room_obj = ctx.guild.get_channel(channel_id)
+        elif room.isdigit():
+            # Es ist eine ID
+            room_obj = ctx.guild.get_channel(int(room))
+        else:
+            # Versuche über channel_mentions
+            if ctx.message.channel_mentions:
+                room_obj = ctx.message.channel_mentions[0]
+        
+        if not room_obj or not isinstance(room_obj, discord.VoiceChannel):
+            await ctx.send("❌ Bitte erwähne einen gültigen Voice-Channel mit # oder gib die Channel-ID ein!")
+            return
+        
+        await self.config.guild(ctx.guild).room.set(room_obj.id)
+        await ctx.send(f"✅ Voice-Warteraum auf {room_obj.mention} gesetzt.")
 
     @supportset.command(name="role")
-    async def supportset_role(self, ctx: commands.Context, role: discord.Role):
-        """Setze die Rolle, die bei neuen Nutzern im Warteraum gepingt wird"""
-        await self.config.guild(ctx.guild).role.set(role.id)
-        await ctx.send(f"✅ Support-Rolle auf {role.mention} gesetzt.")
+    async def supportset_role(self, ctx: commands.Context, role: str):
+        """Setze die Basis-Supportrolle (Mention oder ID)"""
+        # Versuche Rolle zu finden - entweder durch Mention oder ID
+        role_obj = None
+        
+        # Prüfe ob es eine Mention ist (@Rolle oder <@&123456789>)
+        if role.startswith("<@&") and role.endswith(">"):
+            role_id = int(role[3:-1])
+            role_obj = ctx.guild.get_role(role_id)
+        elif role.isdigit():
+            # Es ist eine ID
+            role_obj = ctx.guild.get_role(int(role))
+        else:
+            # Versuche über role_mentions
+            if ctx.message.role_mentions:
+                role_obj = ctx.message.role_mentions[0]
+        
+        if not role_obj:
+            await ctx.send("❌ Bitte erwähne eine gültige Rolle mit @ oder gib die Rollen-ID ein!")
+            return
+        
+        await self.config.guild(ctx.guild).role.set(role_obj.id)
+        await ctx.send(f"✅ Support-Rolle auf {role_obj.mention} gesetzt.")
 
     @supportset.command(name="embed")
     async def supportset_embed(self, ctx: commands.Context, enabled: bool = None):
@@ -412,6 +510,7 @@ class SupportCog(commands.Cog):
         Verwende `[p]duty on` um dich anzumelden
         Verwende `[p]duty off` um dich abzumelden
         Verwende `[p]duty status` um deinen Status zu sehen
+        ODER benutze die Buttons in der Duty-Nachricht!
         """
         await ctx.send_help("duty")
 
@@ -444,10 +543,13 @@ class SupportCog(commands.Cog):
             await ctx.send("⚠️ Du bist bereits im Duty-Modus!")
             return
         
-        # Duty aktivieren
+        # Duty aktivieren und Rolle geben
         await self.config.member(ctx.author).on_duty.set(True)
         start_time = datetime.utcnow()
         await self.config.member(ctx.author).duty_start.set(start_time.timestamp())
+        
+        # Duty-Rolle hinzufügen
+        await self.add_duty_role(ctx.author)
         
         # Auto-Duty Timer starten falls aktiviert
         auto_duty = await self.config.guild(guild).auto_remove_duty()
@@ -509,9 +611,12 @@ class SupportCog(commands.Cog):
             minutes = int((delta.total_seconds() % 3600) // 60)
             duration = f"{hours}h {minutes}min"
         
-        # Duty deaktivieren
+        # Duty deaktivieren und Rolle entfernen
         await self.config.member(ctx.author).on_duty.set(False)
         await self.config.member(ctx.author).duty_start.set(None)
+        
+        # Duty-Rolle entfernen
+        await self.remove_duty_role(ctx.author)
         
         # Nachricht senden
         guild = ctx.guild
@@ -652,6 +757,178 @@ class SupportCog(commands.Cog):
                 embed.description += f"\n...und {len(duty_members) - 10} weitere"
         
         await ctx.send(embed=embed)
+
+    @duty.command(name="setup", aliases=["panel", "board"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def duty_setup(self, ctx: commands.Context):
+        """
+        Erstellt ein Duty-Panel mit Buttons zum An- und Abmelden.
+        
+        Sende eine Nachricht mit Buttons in den aktuellen Channel.
+        Support-Mitarbeiter können dann einfach auf die Buttons klicken!
+        """
+        guild = ctx.guild
+        role_id = await self.config.guild(guild).role()
+        
+        if not role_id:
+            await ctx.send("❌ Es wurde keine Support-Rolle konfiguriert!")
+            return
+        
+        base_role = guild.get_role(role_id)
+        if not base_role:
+            await ctx.send("❌ Die konfigurierte Support-Rolle existiert nicht mehr!")
+            return
+        
+        # Erstelle das Panel Embed
+        embed = discord.Embed(
+            title="🎧 Support Duty Panel",
+            description=(
+                f"**Willkommen im Support-Duty System!**\n\n"
+                f"Hier kannst du dich ganz einfach für den Support-Dienst an- und abmelden.\n"
+                f"Klicke auf die Buttons unten um deinen Status zu ändern.\n\n"
+                f"🟢 **On Duty**: Du wirst bei neuen Support-Anfragen gepingt\n"
+                f"🔴 **Off Duty**: Du wirst nicht gepingt\n\n"
+                f"Voraussetzung: Du musst die {base_role.mention} Rolle haben."
+            ),
+            color=discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_footer(text="Support Duty System")
+        
+        # Erstelle View mit Buttons
+        view = discord.ui.View(timeout=None)
+        view.add_item(DutyToggleButton(is_on=True))
+        view.add_item(DutyToggleButton(is_on=False))
+        
+        msg = await ctx.send(embed=embed, view=view)
+        await ctx.send(f"✅ Duty-Panel wurde in {ctx.channel.mention} erstellt!\nNachrichten-ID: `{msg.id}`\n\n*Hinweis: Nach einem Bot-Neustart muss das Panel neu erstellt werden.*", delete_after=30)
+
+
+class DutyToggleButton(discord.ui.Button):
+    """Button für Duty An/Aus"""
+    
+    def __init__(self, is_on: bool):
+        if is_on:
+            super().__init__(
+                style=discord.ButtonStyle.green,
+                label="🟢 On Duty",
+                custom_id="duty_on",
+                emoji="✅"
+            )
+        else:
+            super().__init__(
+                style=discord.ButtonStyle.red,
+                label="🔴 Off Duty",
+                custom_id="duty_off",
+                emoji="⛔"
+            )
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Wird aufgerufen wenn der Button geklickt wird"""
+        cog = interaction.client.get_cog("SupportCog")
+        if not cog:
+            await interaction.response.send_message("❌ Cog nicht gefunden!", ephemeral=True)
+            return
+        
+        guild = interaction.guild
+        member = interaction.user
+        
+        role_id = await cog.config.guild(guild).role()
+        if not role_id:
+            await interaction.response.send_message("❌ Keine Support-Rolle konfiguriert!", ephemeral=True)
+            return
+        
+        base_role = guild.get_role(role_id)
+        if not base_role:
+            await interaction.response.send_message("❌ Support-Rolle nicht gefunden!", ephemeral=True)
+            return
+        
+        if base_role not in member.roles:
+            await interaction.response.send_message(
+                f"❌ Du benötigst die {base_role.mention} Rolle um Duty zu nutzen!",
+                ephemeral=True
+            )
+            return
+        
+        is_on_duty = await cog.config.member(member).on_duty()
+        
+        if self.custom_id == "duty_on":
+            # On Duty setzen
+            if is_on_duty:
+                await interaction.response.send_message("⚠️ Du bist bereits im Duty-Modus!", ephemeral=True)
+                return
+            
+            # Duty aktivieren
+            await cog.config.member(member).on_duty.set(True)
+            start_time = datetime.utcnow()
+            await cog.config.member(member).duty_start.set(start_time.timestamp())
+            
+            # Duty-Rolle hinzufügen
+            await cog.add_duty_role(member)
+            
+            embed = discord.Embed(
+                title="🟢 Duty Gestartet",
+                description=f"{member.mention} hat sich für den Support-Dienst angemeldet!",
+                color=discord.Color.green(),
+                timestamp=start_time
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="👤 Mitarbeiter", value=f"{member.display_name}", inline=True)
+            
+            # Zähle alle aktiven Duty-User
+            duty_count = 0
+            for m in base_role.members:
+                is_duty = await cog.config.member(m).on_duty()
+                if is_duty:
+                    duty_count += 1
+            
+            embed.add_field(name="📊 Aktive Supporter", value=f"🟢 {duty_count} Teammitglieder im Dienst", inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+        
+        else:  # duty_off
+            # Off Duty setzen
+            if not is_on_duty:
+                await interaction.response.send_message("ℹ️ Du bist aktuell nicht im Duty-Modus.", ephemeral=True)
+                return
+            
+            # Hole Startzeit für Statistik
+            start_time = await cog.config.member(member).duty_start()
+            duration = "Unbekannt"
+            if start_time:
+                start_dt = datetime.fromtimestamp(start_time)
+                delta = datetime.utcnow() - start_dt
+                hours = int(delta.total_seconds() // 3600)
+                minutes = int((delta.total_seconds() % 3600) // 60)
+                duration = f"{hours}h {minutes}min"
+            
+            # Duty deaktivieren
+            await cog.config.member(member).on_duty.set(False)
+            await cog.config.member(member).duty_start.set(None)
+            
+            # Duty-Rolle entfernen
+            await cog.remove_duty_role(member)
+            
+            embed = discord.Embed(
+                title="🔴 Duty Beendet",
+                description=f"{member.mention} hat sich vom Support-Dienst abgemeldet.",
+                color=discord.Color.red(),
+                timestamp=datetime.utcnow()
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="👤 Mitarbeiter", value=f"{member.display_name}", inline=True)
+            embed.add_field(name="⏱️ Dauer", value=duration, inline=True)
+            
+            # Zähle verbleibende aktive Duty-User
+            duty_count = 0
+            for m in base_role.members:
+                is_duty = await cog.config.member(m).on_duty()
+                if is_duty:
+                    duty_count += 1
+            
+            embed.add_field(name="📊 Verbleibende Supporter", value=f"🟢 {duty_count} Teammitglieder im Dienst", inline=True)
+            
+            await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: Red):
